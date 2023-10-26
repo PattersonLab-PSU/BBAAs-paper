@@ -1,0 +1,345 @@
+---
+title: "Transcriptomics analysis of Bifidobacterium longum upon exposure to CA/DCA"
+date: "`r format(Sys.time(),'%d %B, %Y')`"
+author: "Bipin Rimal"
+output:
+  html_document:
+    df_print: paged
+    theme: united
+    highlight: tango
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+
+We incubated *Bifidobacterium longum* subsp. longum type strain with
+deconjugated bile acids (CA/DCA) at two dosages (20uM, 200uM) and performed transcriptomics analysis. 
+
+# Steps {.tabset}
+
+## Preprocessing 
+
+### Loading Libraries 
+```{r,warning=FALSE,message=FALSE}
+rm(list=ls())
+library(tidyverse)
+library(ggsci)
+library(DESeq2)
+library(apeglm)
+library(pheatmap)
+library(qvalue)
+library(RColorBrewer)
+library(ggplot2)
+library(biomaRt)
+library(clusterProfiler)
+#library(ggVennDiagram)
+source("theme_bipin.r")
+library(Rsubread)
+library(ggthemes)
+library(extrafont)
+extrafont::font_import()
+```
+
+### Setting up Directories and loading required files
+```{r}
+homeDir <- system("echo $(pwd)",intern = T)
+bamDir <- paste0(homeDir,"/02.process/b.bam/"); dir.create(bamDir,recursive = TRUE)
+figDir <- paste0(homeDir,"/03.results/a.figures"); dir.create(figDir,recursive=TRUE)
+ref<-paste0(homeDir,"/01.ref/")
+GTF<-paste0(ref,"GCF_000196555.1_ASM19655v1_genomic.gtf")
+head(read.table(GTF,quote="",fill=TRUE))
+```
+### Check the bam files
+```{r}
+bamFiles <- list.files(bamDir,pattern="*.bam",full.names = TRUE)
+bamFiles
+```
+## Feature Counts {Takes a long time}
+```{r}
+# readCts<-Rsubread::featureCounts(bamFiles[1],
+# 
+# 	# annotation
+# 	annot.ext="01.ref/GCF_000196555.1_ASM19655v1_genomic.gtf",
+# 	isGTFAnnotationFile=TRUE,
+# 	GTF.featureType="CDS",
+# 	GTF.attrType="gene_id",
+# 	# level of summarization
+# 	useMetaFeatures=TRUE,
+# 	
+# 	# overlap between reads and features
+# 	allowMultiOverlap=FALSE,
+# 	minOverlap=1,
+# 	largestOverlap=FALSE,
+# 	readExtension5=0,
+# 	readExtension3=0,
+# 	read2pos=NULL,
+# 	
+# 	# multi-mapping reads
+# 	countMultiMappingReads=FALSE,
+# 	fraction=FALSE,
+# 
+# 	# read filtering
+# 	minMQS=0,
+# 	splitOnly=FALSE,
+# 	nonSplitOnly=FALSE,
+# 	primaryOnly=FALSE,
+# 	ignoreDup=FALSE,
+# 	
+# 	# strandness
+# 	strandSpecific=2,
+# 	
+# 	# exon-exon junctions
+# 	juncCounts=FALSE,
+# 	genome=NULL,
+# 	
+# 	# parameters specific to paired end reads
+# 	isPairedEnd=TRUE,
+# 	requireBothEndsMapped=FALSE,
+# 	checkFragLength=FALSE,
+# 	minFragLength=50,
+# 	maxFragLength=600,
+# 	countChimericFragments=TRUE,	
+# 	autosort=TRUE,
+# 	
+# 	# miscellaneous
+# 	nthreads=4,
+# 	maxMOp=10
+# 	)
+
+#dir.create("03.results",recursive=T)
+#saveRDS(test2,"./03.results/ReadCounts.RDS.RDS")
+```
+
+
+## Differential gene expression analysis
+I will use DESeq2 for the analysis. 
+
+But first, I am creating a feature table metadata and sample metadata.
+```{r,warning=FALSE}
+ftr_table<-
+read.csv("01.ref/GCF_000196555.1_ASM19655v1_genomic.gtf",skip = 5,sep="\t",header=FALSE) %>% 
+  mutate(
+    gene_id = str_extract(V9,"(?<=gene_id ).*?(?=;)"),
+    refseq = str_extract(V9,"(?<=RefSeq:).*?(?=;)"),
+    #protein_id=str_extract(V9,"(?<=protein_id).*?(?=;)"),
+    symbol=str_extract(V9,"(?<=gene ).*?(?=;)"),
+    product=str_extract(V9,"(?<=product ).*?(?=;)")
+         ) %>%
+  mutate(symbol=case_when(
+    !is.na(symbol) ~ symbol,                                                                                                              TRUE ~ str_extract(V9,"(?<=RefSeq:).*?(?=;)"))) %>%
+  select(gene_id,refseq,symbol,product) %>% 
+  filter(!is.na(product)) %>%
+  unique()
+
+
+
+## Loading the feature counts exported file
+readCts<-readRDS("./03.results/ReadCounts.RDS")$counts
+dataMat<-readCts
+
+## Setting up the metadata file
+colData<-data.frame("Sample"=colnames(dataMat)) %>%  
+  mutate(ID=sub(pattern = "(Blongum_)(.*)(_S.*)",replacement = "\\2",Sample,perl = TRUE)) %>%
+  ## Blongum_20_3_S84_aligned.bam: (Blongum_) is the first capture group, (.*) second capture group, (_S.*) third capture group, replaced by second capture group
+  arrange(ID) %>%
+  mutate(Dose=case_when(
+    grepl("200",ID) ~ "High",
+    grepl("Veh",ID) ~ "Vehicle")) %>%
+    mutate(Dose=factor(Dose)) %>%
+  column_to_rownames("Sample")
+
+DT::datatable(colData, extensions = "AutoFill"
+  )
+```
+
+Total number of counts per sample in millions:
+```{r,warning=FALSE}
+source("theme_bipin.r")
+round(colSums(readCts)/1e6, 1) %>% data.frame %>% rownames_to_column() %>%
+   `colnames<-`(c("Sample","Total Reads (in millions)")) %>% 
+  left_join(colData %>% rownames_to_column("Sample")) %>%
+  ggplot(aes(x=Dose,y=`Total Reads (in millions)`, fill=Dose)) +
+  geom_violin(alpha=0.4) +
+  geom_jitter(width=0.05,aes(color=Dose)) +
+  theme(axis.title.x = element_blank(),
+        legend.position = "none") +
+  labs(title="Total number of reads in samples")
+
+```
+
+### Defining the DeseqDatasSet object
+
+```{r,warning=FALSE}
+counts=dataMat
+all(rownames(colData) %in% colnames(counts))
+
+colData$Dose <- relevel(colData$Dose, "Vehicle")
+dds <- DESeqDataSetFromMatrix(counts, colData=colData, design=~Dose) # Only looking at the effect of the two doses vs vehicle
+```
+
+
+### Pre-filtering
+Next few steps are quality controls. One of the things that can be done is pre-filtering. Performing pre-filtering to keep only rows that have at least 10 reads total.
+
+```{r,warning=FALSE}
+keep<-rowSums(counts(dds))>=10
+nrow(counts(dds))-sum(keep)
+dds<-dds[keep,]
+
+```
+**Only two features have counts less than 10**
+
+## Data exploration
+To get a general overview of the data, we will do exploratory analysis using clustering and principal components analysis (PCA). With raw counts data, genes with high counts might sway the PCA. 
+
+Transformation: `rlog` 'regularized log' transformation
+`This function transforms the count data to the log2 scale in a way which minimizes differences between samples for rows with small counts, and which normalizes with respect to library size. The rlog transformation produces a similar variance stabilizing effect as varianceStabilizingTransformation, though rlog is more robust in the case when the size factors vary widely. The transformation is useful when checking for outliers or as input for machine learning techniques such as clustering or linear discriminant analysis. rlog takes as input a DESeqDataSet and returns a RangedSummarizedExperiment object.`
+```{r,warning=FALSE}
+rlogd <- rlog(dds, blind=FALSE) # Transformation is not blinded to experimental design. 
+```
+
+
+### Distance heatmap
+```{r,warning=FALSE}
+sampleDists <- dist(t(assay(rlogd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(rlogd$Dose, rlogd$ID, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+```
+
+### PCA Plot**
+```{r,warning=FALSE}
+pcaData <- plotPCA(rlogd, intgroup=c("Dose"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=Dose, shape=Dose)) +
+  geom_point(size=5) +
+  stat_ellipse(type = "t", linetype = 2) + #coord_fixed() +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  scale_color_manual(values=c("#E64B3599","#4DBBD599","#00A08799")) +
+  #scale_shape_manual(values = rep(7:20, len = 13)) +
+  theme_classic() + 
+  theme(legend.position = "right",legend.direction="vertical") +
+  #theme_bipin() +
+  labs(title="PCA plot for transcriptomics data")
+ggsave(paste0(figDir,"/PCA_transcriptomics.pdf"),width = 7, height=5)
+```
+
+
+
+## Differential Analysis
+Actually doing the DESeq Analysis:
+```{r, warning=FALSE}
+dds<-DESeq(dds)
+dds
+```
+
+#### Normalized Counts
+```{r,warning=FALSE}
+normalized_counts<-counts(dds,normalized=TRUE)
+normalized_counts<-normalized_counts %>% data.frame %>% rownames_to_column("gene_id") %>% left_join(ftr_table)
+
+write.csv(normalized_counts,"03.results/normalized_counts.csv")
+DT::datatable(normalized_counts,extensions = "AutoFill")
+```
+
+### Sanity check
+BLLJ_1101 is lactate dehydrogenase.
+```{r}
+normalized_counts %>% 
+  filter(symbol %in% c("gap", "ldh","bsh") | gene_id %in% c("BLLJ_RS06645")) %>%
+  gather(key="Sample",value="Normalized Counts",-c(gene_id,symbol,product,refseq)) %>% 
+  left_join(colData %>% rownames_to_column("Sample")) %>%
+  ggplot(aes(x=Dose,y=`Normalized Counts`, fill=product)) +
+  geom_boxplot(alpha=0.5,aes(fill=product)) + 
+  theme_classic()  
+
+ggsave("03.results/a.figures/bsh_gap_ldh.png",width=6,height=5)
+```
+```{r}
+normalized_counts %>% 
+  filter(gene_id %in% c("BLLJ_RS06645","BLLJ_RS06435","BLLJ_RS06745","BLLJ_RS05855","BLLJ_RS04195","BLLJ_RS04200","BLLJ_RS07800")) %>%
+  gather(key="Sample",value="Normalized Counts",-c(gene_id,symbol,product,refseq)) %>% 
+  left_join(colData %>% rownames_to_column("Sample")) %>%
+  ggplot(aes(x=Dose,y=`Normalized Counts`, color=product,fill=product)) +
+  geom_boxplot(alpha=0.1,aes(fill=product)) + 
+  geom_point(position=position_dodge(width=0.75),aes(color=product,group=product)) + 
+  theme_classic()
+
+
+#ggsave("03.results/a.figures/bsh_GNAT_Synthetase.png",width=10,height=5)
+```
+
+
+#### Intercepts
+By default, the comparison is based on the first condition based on alphabetical order vs the rest. This can be modified by setting the reference level (which has been done). There are two comparisons:
+```{r}
+resultsNames(dds)
+```
+
+### Working the comparisons (Contrasts)
+
+#### High Dose vs Vehicle
+```{r}
+reshighctrl <- results(dds, contrast=c("Dose", "High","Vehicle"), alpha=0.05, pAdjustMethod="BH") %>% as.data.frame() %>%
+  #filter(abs(log2FoldChange)>1) %>% filter(padj<0.1) %>%
+  rownames_to_column("gene_id") %>% left_join(ftr_table) 
+
+write.csv(reshighctrl,"./03.results/Results_High_vs_Control_annotated.csv")
+reshighctrl %>%
+  DT::datatable(.,extensions="AutoFill")
+```
+### Exploring and exporting results
+
+We can also do some visualizations. 
+
+#### Volcano Plot
+
+```{r,warning=FALSE}
+lfc=1
+pval=0.1
+library(ggsci)
+source("theme_bipin.r")
+reshighctrl %>% mutate(color=case_when(
+    abs(log2FoldChange)>lfc & padj>pval ~ "grey",
+    abs(log2FoldChange)<lfc & padj<pval ~ "grey",
+    #abs(log2FoldChange)>lfc & padj<pval ~ pal_nejm("default", alpha = 0.4)(8)[1],
+    abs(log2FoldChange)>lfc & padj<pval ~ "#ED8172",
+    abs(log2FoldChange)<lfc & padj>pval ~ "grey"
+    ),
+    plot_label=case_when(
+    abs(log2FoldChange)>lfc & padj<pval ~ symbol
+    ),
+    plot_label=gsub("\\.",NA,plot_label)
+  )%>%
+  ggplot(aes(log2FoldChange, -log10(padj), fill=color,label=plot_label)) + 
+  geom_point(alpha=1,size=4,pch=21) + 
+  #geom_text(hjust=-0.3, vjust=0) +
+  scale_fill_identity() +
+  labs(x=expression(Log[2]~fold~change), y=expression(-~Log[10]~padj~value)) +
+  geom_vline(xintercept=c(-lfc,lfc), linetype=2) + geom_hline(yintercept=-log10(pval), linetype=5) +
+  ggrepel::geom_label_repel(alpha=1,family="Arial",color="black",fill="white",face="italicize") +
+  #scale_y_log10() +
+  xlim(-3,3) +
+  theme_bipin() +
+  theme(axis.title = element_text(size=16),
+        text = element_text(family="Arial")) 
+
+ggsave("./03.results/a.figures/HighvsVehicle.pdf",width=6,height=6)
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
+
+
